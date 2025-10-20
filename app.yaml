@@ -1,0 +1,11 @@
+command:
+- "python"
+- "app.py"
+
+env:
+- name: "SERVING_ENDPOINT_NAME"
+  valueFrom: "serving-endpoint"
+- name: "GENIE_SPACE"
+  valueFrom: "genie-space"
+- name: "GUNICORN_TIMEOUT"
+  value: "300"
