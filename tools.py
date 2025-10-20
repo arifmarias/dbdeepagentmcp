@@ -8,7 +8,10 @@ from genie_room import genie_query
 
 logger = logging.getLogger(__name__)
 
-@tool
+def get_today_str() -> str:
+    """Get current date in a human-readable format."""
+    return datetime.now().strftime("%a %b %-d, %Y")
+
 def get_response_from_genie(question: str) -> str:
     """
     Query Genie with a natural language question and return the response.
@@ -64,7 +67,7 @@ def get_response_from_genie(question: str) -> str:
         return f"Error querying Genie: {str(e)}"
 
 
-@tool
+@tool(parse_docstring=True)
 def think_tool(reflection: str) -> str:
     """Tool for strategic reflection on research progress and decision-making.
 

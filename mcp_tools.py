@@ -1,7 +1,7 @@
 from typing import Any, Callable, List, Generator, TypedDict, cast
 from contextlib import asynccontextmanager
 import asyncio
-import threading
+import nest_asyncio  # ✅ ADD THIS
 
 from databricks_mcp import DatabricksOAuthClientProvider
 from databricks.sdk import WorkspaceClient
@@ -15,6 +15,9 @@ from mcp.types import (
     Tool as MCPTool,
 )
 from langchain_core.tools import BaseTool, ToolException, StructuredTool, tool
+
+# ✅ CRITICAL: Apply nest_asyncio to allow nested event loops in Flask/Dash
+nest_asyncio.apply()
 
 NonTextContent = ImageContent | EmbeddedResource
 MAX_ITERATIONS = 1000
@@ -148,8 +151,8 @@ def _convert_mcp_tool_to_langchain_tool(
     def call_tool_sync(
         **arguments: dict[str, Any]
     ) -> tuple[str | list[str], list[NonTextContent] | None]:
-        # ✅ CRITICAL FIX: Proper async execution in Flask/Dash context
-        return _run_async_in_thread(call_tool_async(**arguments))
+        # ✅ CHANGED: Use asyncio.run() directly (nest_asyncio allows this)
+        return asyncio.run(call_tool_async(**arguments))
 
     return StructuredTool(
         name=tool.name,
@@ -160,37 +163,6 @@ def _convert_mcp_tool_to_langchain_tool(
         response_format="content_and_artifact",
         metadata=tool.annotations.model_dump() if tool.annotations else None,
     )
-
-
-# ✅ CRITICAL FIX: Helper function to run async code in Flask/Dash
-def _run_async_in_thread(coro):
-    """
-    Run an async coroutine in a separate thread with its own event loop.
-    This is necessary when the main thread already has a running event loop (Flask/Dash).
-    """
-    result = None
-    exception = None
-    
-    def run_in_thread():
-        nonlocal result, exception
-        try:
-            # Create a new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(coro)
-            finally:
-                loop.close()
-        except Exception as e:
-            exception = e
-    
-    thread = threading.Thread(target=run_in_thread)
-    thread.start()
-    thread.join()
-    
-    if exception:
-        raise exception
-    return result
 
 
 def list_databricks_mcp_tools(
@@ -225,8 +197,8 @@ def list_databricks_mcp_tools(
         tasks = [_load_databricks_mcp_tools(con) for con in connections]
         return await asyncio.gather(*tasks)
 
-    # ✅ CRITICAL FIX: Run async code properly in Flask/Dash context
-    all_tools = _run_async_in_thread(gather())
+    # ✅ CHANGED: Use asyncio.run() directly (nest_asyncio allows this)
+    all_tools = asyncio.run(gather())
     
     # Flatten the results and return them as a single list of tools
     return sum(all_tools, [])
