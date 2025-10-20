@@ -853,13 +853,23 @@ def generate_insights(n_clicks, btn_id, chat_history):
 def generate_deep_insights(n_clicks, btn_id, chat_history):
     """
     Generate deep insights using the custom agent based on the original user question.
+    
+    This function:
+    1. Retrieves the original user question from chat history
+    2. Validates environment configuration (Genie space ID)
+    3. Authenticates using On-Behalf-Of (OBO) user credentials
+    4. Validates access to the Genie space via regular API
+    5. Creates MCP connection with enhanced error handling
+    6. Loads MCP tools from the Genie space
+    7. Creates and invokes the deep insight agent
+    8. Returns formatted insights or detailed error messages
     """
     if not n_clicks:
         return None
     
     table_id = btn_id["index"]
     
-    # Retrieve the original user question
+    # ========== STEP 1: RETRIEVE USER QUESTION ==========
     user_question = None
     if chat_history and len(chat_history) > 0:
         user_question = chat_history[0].get('user_questions', {}).get(table_id)
@@ -871,147 +881,386 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
         )
     
     try:
-        # Get user token
+        # ========== STEP 2: VALIDATE ENVIRONMENT VARIABLES ==========
+        GENIE_SPACE_ID = os.environ.get("GENIE_SPACE")
+        if not GENIE_SPACE_ID:
+            logger.error("GENIE_SPACE environment variable is not set")
+            return html.Div([
+                html.Div("Configuration Error", style={
+                    "color": "red", 
+                    "fontWeight": "bold", 
+                    "marginTop": "10px"
+                }),
+                html.Div("GENIE_SPACE environment variable is not configured in app.yaml", 
+                        style={"marginTop": "5px"}),
+                html.Div("Please set it in your app.yaml file.", 
+                        style={"fontSize": "12px", "color": "#666"})
+            ])
+        
+        logger.info(f"Using Genie Space ID: {GENIE_SPACE_ID}")
+        
+        # ========== STEP 3: GET USER AUTHENTICATION ==========
         headers = request.headers
         user_token = headers.get('X-Forwarded-Access-Token')
         
         if not user_token:
-            logger.error("No user token found in headers")
+            logger.error("No user token found in request headers")
             return html.Div(
                 "Authentication error: No user token found.", 
                 style={"color": "red", "marginTop": "10px"}
             )
         
-        # Validate GENIE_SPACE_ID
-        if not GENIE_SPACE_ID:
-            logger.error("GENIE_SPACE environment variable is not set")
-            return html.Div(
-                "Configuration error: Genie space ID is not configured.", 
-                style={"color": "red", "marginTop": "10px"}
-            )
+        logger.info("User token retrieved successfully")
         
-        logger.info(f"Starting deep insights for question: {user_question[:50]}...")
-        logger.info(f"Using Genie Space ID: {GENIE_SPACE_ID}")
-        
-        # Import credentials provider
-        from databricks_ai_bridge import ModelServingUserCredentials
-        
-        # ✅ CRITICAL FIX: Create WorkspaceClient with ONLY ModelServingUserCredentials
-        # DO NOT mix with token/config when using MCP from Databricks Apps
-        workspace_client = WorkspaceClient(
-            credentials_strategy=ModelServingUserCredentials()
-        )
-        
-        logger.info("WorkspaceClient created with ModelServingUserCredentials for OBO auth")
-        
-        # Validate Genie space access
+        # ========== STEP 4: VALIDATE GENIE SPACE ACCESS (Regular API) ==========
         try:
+            from genie_room import GenieClient
             genie_client = GenieClient(
                 host=os.environ.get("DATABRICKS_HOST"),
                 space_id=GENIE_SPACE_ID,
                 token=user_token
             )
             space_info = genie_client.get_space(GENIE_SPACE_ID)
-            logger.info(f"Successfully validated access to Genie space: {space_info.get('title', 'Unknown')}")
+            logger.info(f"✓ Successfully validated access to Genie space: {space_info.get('title', 'Unknown')}")
+            
         except Exception as space_error:
             logger.error(f"Failed to access Genie space: {str(space_error)}")
+            
+            # Provide detailed error message
+            error_message = str(space_error)
+            suggestions = []
+            
+            if "RESOURCE_DOES_NOT_EXIST" in error_message or "does not exist" in error_message:
+                suggestions = [
+                    "The Genie space ID is incorrect or the space has been deleted",
+                    "Check the space ID in your Genie UI URL: .../genie/rooms/<SPACE_ID>",
+                    "Verify the GENIE_SPACE value in app.yaml matches the space URL",
+                ]
+            elif "403" in error_message or "permission" in error_message.lower():
+                suggestions = [
+                    "You don't have permission to access this Genie space",
+                    "Ask the space owner to grant you CAN_RUN permission",
+                    "Check the space permissions in the Genie UI (Share button)",
+                ]
+            else:
+                suggestions = [
+                    "Check if the Genie space exists in your workspace",
+                    "Verify you have CAN_RUN permission on the space",
+                    "Ensure the space ID in app.yaml is correct",
+                ]
+            
             return html.Div([
-                html.Div("Error: Cannot access Genie space", style={
+                html.Div("Cannot Access Genie Space", style={
                     "color": "red", 
                     "fontWeight": "bold",
                     "marginTop": "10px",
                     "marginBottom": "10px"
                 }),
-                html.Div(f"Space ID: {GENIE_SPACE_ID}", style={
-                    "fontSize": "12px",
-                    "color": "#666",
-                    "marginBottom": "5px"
-                }),
-                html.Div("Possible issues:", style={
-                    "fontSize": "12px",
-                    "marginTop": "10px",
-                    "marginBottom": "5px"
-                }),
-                html.Ul([
-                    html.Li("The Genie space ID may be incorrect"),
-                    html.Li("You may not have permission to access this space"),
-                    html.Li("Check GENIE_SPACE in app.yaml"),
-                ], style={"fontSize": "12px", "color": "#666"})
+                html.Div([
+                    html.Div(f"Space ID: {GENIE_SPACE_ID}", style={
+                        "fontFamily": "monospace",
+                        "fontSize": "12px",
+                        "color": "#666",
+                        "marginBottom": "10px",
+                        "padding": "5px",
+                        "background": "#f5f5f5",
+                        "borderRadius": "4px"
+                    }),
+                    html.Div("Error details:", style={"fontSize": "12px", "marginBottom": "5px"}),
+                    html.Pre(str(space_error), style={
+                        "background": "#f8f8f8",
+                        "padding": "10px",
+                        "borderRadius": "4px",
+                        "fontSize": "11px",
+                        "overflow": "auto",
+                        "maxHeight": "150px",
+                        "marginBottom": "10px"
+                    }),
+                    html.Div("Possible solutions:", style={
+                        "fontSize": "12px",
+                        "marginTop": "10px",
+                        "marginBottom": "5px",
+                        "fontWeight": "bold"
+                    }),
+                    html.Ul([
+                        html.Li(suggestion, style={"fontSize": "12px", "marginBottom": "5px"}) 
+                        for suggestion in suggestions
+                    ])
+                ])
             ])
         
-        # ✅ Initialize the model with user token (for ChatDatabricks, still use token)
-        model = ChatDatabricks(
-            endpoint=os.getenv("SERVING_ENDPOINT_NAME"),
-            token=user_token,
-            temperature=0.0,  
-            max_tokens=4000,  
+        # ========== STEP 5: INITIALIZE WORKSPACE CLIENT WITH OBO AUTH ==========
+        logger.info("Initializing WorkspaceClient with ModelServingUserCredentials...")
+        
+        from databricks_ai_bridge import ModelServingUserCredentials
+        
+        # ✅ CRITICAL: Use ONLY ModelServingUserCredentials for OBO auth in Databricks Apps
+        workspace_client = WorkspaceClient(
+            credentials_strategy=ModelServingUserCredentials()
         )
         
-        # Build MCP URL
-        databricks_host = workspace_client.config.host
-        genie_mcp_url = f"{databricks_host}/api/2.0/mcp/genie/{GENIE_SPACE_ID}"
+        logger.info("WorkspaceClient initialized with OBO authentication")
         
-        logger.info(f"Connecting to Genie MCP at: {genie_mcp_url}")
-        
-        # ✅ Create MCP connection with OBO-authenticated workspace client
-        mcp_connection_genie = DatabricksConnection(
-            server_url=genie_mcp_url, 
-            workspace_client=workspace_client  # This now has proper OBO credentials
-        )
-        
-        # Get MCP tools
+        # Validate OBO authentication is working
         try:
-            logger.info("Loading MCP tools...")
-            mcp_tools = list_databricks_mcp_tools(connections=[mcp_connection_genie])
-            logger.info(f"Successfully loaded {len(mcp_tools)} MCP tools")
-            
-            # Log tool names
-            for tool in mcp_tools:
-                logger.info(f"  - Tool: {tool.name}")
-                
+            current_user = workspace_client.current_user.me()
+            logger.info(f"✓ OBO authentication successful for user: {current_user.user_name}")
         except Exception as e:
-            logger.error(f"Error loading MCP tools: {str(e)}", exc_info=True)
+            logger.error(f"✗ OBO authentication failed: {str(e)}")
             return html.Div([
-                html.Div("Error loading MCP tools:", style={
+                html.Div("Authentication Error", style={
                     "color": "red", 
                     "fontWeight": "bold",
                     "marginTop": "10px"
                 }),
+                html.Div("Failed to authenticate with ModelServingUserCredentials", 
+                        style={"marginTop": "5px"}),
                 html.Pre(str(e), style={
-                    "background": "#f8f8f8",
-                    "padding": "10px",
-                    "borderRadius": "4px",
+                    "background": "#f8f8f8", 
+                    "padding": "10px", 
                     "fontSize": "12px",
                     "overflow": "auto",
-                    "maxHeight": "200px"
+                    "maxHeight": "150px"
+                })
+            ])
+        
+        # ========== STEP 6: INITIALIZE LLM MODEL ==========
+        from langchain_databricks import ChatDatabricks
+        
+        model = ChatDatabricks(
+            endpoint=os.getenv("SERVING_ENDPOINT_NAME"),
+            token=user_token,  # ChatDatabricks still needs the token
+            temperature=0.0,  
+            max_tokens=4000,  
+        )
+        
+        logger.info("LLM model initialized")
+        
+        # ========== STEP 7: BUILD MCP URL AND CONNECTION ==========
+        databricks_host = workspace_client.config.host
+        
+        # Ensure host has https:// prefix
+        if not databricks_host.startswith('https://'):
+            databricks_host = f"https://{databricks_host}"
+        
+        logger.info(f"Databricks host: {databricks_host}")
+        logger.info(f"Genie Space ID: {GENIE_SPACE_ID}")
+        
+        genie_mcp_url = f"{databricks_host}/api/2.0/mcp/genie/{GENIE_SPACE_ID}"
+        logger.info(f"Connecting to Genie MCP at: {genie_mcp_url}")
+        
+        from mcp_tools import DatabricksConnection, list_databricks_mcp_tools
+        
+        mcp_connection_genie = DatabricksConnection(
+            server_url=genie_mcp_url, 
+            workspace_client=workspace_client
+        )
+        
+        logger.info("MCP connection created successfully")
+        
+        # ========== STEP 8: LOAD MCP TOOLS WITH ENHANCED ERROR HANDLING ==========
+        try:
+            logger.info("Loading MCP tools...")
+            mcp_tools = list_databricks_mcp_tools(connections=[mcp_connection_genie])
+            logger.info(f"✓ Successfully loaded {len(mcp_tools)} MCP tools")
+            
+            # Log tool names for debugging
+            for tool in mcp_tools:
+                logger.info(f"  - Tool: {tool.name}")
+                
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error loading MCP tools: {error_msg}", exc_info=True)
+            
+            # Check if it's the specific "datarooms" error
+            if "RESOURCE_DOES_NOT_EXIST" in error_msg or "datarooms" in error_msg:
+                logger.error(f"MCP cannot find space at internal path: datarooms/{GENIE_SPACE_ID}")
+                
+                return html.Div([
+                    html.Div("MCP Access Error - Space Not Found via MCP", style={
+                        "color": "red", 
+                        "fontWeight": "bold",
+                        "marginTop": "10px",
+                        "marginBottom": "10px"
+                    }),
+                    html.Div([
+                        html.P([
+                            "The Genie space ",
+                            html.Code(GENIE_SPACE_ID, style={
+                                "background": "#f5f5f5",
+                                "padding": "2px 6px",
+                                "borderRadius": "3px",
+                                "fontSize": "13px"
+                            }),
+                            " exists and works with the regular API, but MCP cannot access it."
+                        ]),
+                        html.P([
+                            "MCP uses an internal path ",
+                            html.Code(f"datarooms/{GENIE_SPACE_ID}", style={
+                                "background": "#f5f5f5",
+                                "padding": "2px 6px",
+                                "borderRadius": "3px",
+                                "fontSize": "13px"
+                            }),
+                            " which requires additional OAuth scopes."
+                        ]),
+                        html.Hr(style={"margin": "15px 0"}),
+                        html.Div("✅ Required Actions:", style={
+                            "fontWeight": "bold", 
+                            "marginTop": "10px",
+                            "marginBottom": "10px",
+                            "fontSize": "14px"
+                        }),
+                        html.Ol([
+                            html.Li([
+                                html.Strong("Add 'dashboards' scope to manifest.yaml"),
+                                html.Div([
+                                    "In your ",
+                                    html.Code("manifest.yaml"),
+                                    " file, add ",
+                                    html.Code("dashboards"),
+                                    " to ",
+                                    html.Code("user_api_scopes"),
+                                    " (in addition to ",
+                                    html.Code("dashboards.genie"),
+                                    ")"
+                                ], style={"fontSize": "12px", "color": "#666", "marginTop": "5px"}),
+                                html.Pre("""user_api_scopes:
+                                    - serving.serving-endpoints
+                                    - dashboards.genie
+                                    - dashboards  # ← ADD THIS LINE
+                                    - files.files
+                                    - sql
+                                    - apps.apps""", style={
+                                    "background": "#f8f8f8",
+                                    "padding": "8px",
+                                    "fontSize": "11px",
+                                    "borderRadius": "4px",
+                                    "marginTop": "5px",
+                                    "overflow": "auto"
+                                })
+                            ], style={"marginBottom": "15px"}),
+                            html.Li([
+                                html.Strong("Verify CAN_RUN permission"),
+                                html.Div(
+                                    "In Databricks UI, open the Genie space → Click 'Share' → Verify you have CAN_RUN permission (not just CAN_VIEW)",
+                                    style={"fontSize": "12px", "color": "#666", "marginTop": "5px"}
+                                )
+                            ], style={"marginBottom": "15px"}),
+                            html.Li([
+                                html.Strong("Redeploy the app"),
+                                html.Div([
+                                    "Run ",
+                                    html.Code("databricks apps deploy"),
+                                    " after making manifest.yaml changes"
+                                ], style={"fontSize": "12px", "color": "#666", "marginTop": "5px"})
+                            ], style={"marginBottom": "15px"}),
+                            html.Li([
+                                html.Strong("Restart the app"),
+                                html.Div(
+                                    "Stop and start the app to ensure new scopes are applied",
+                                    style={"fontSize": "12px", "color": "#666", "marginTop": "5px"}
+                                )
+                            ], style={"marginBottom": "15px"}),
+                        ], style={"marginTop": "10px", "paddingLeft": "20px"}),
+                        html.Hr(style={"margin": "15px 0"}),
+                        html.Details([
+                            html.Summary("🔍 Technical Details", style={
+                                "cursor": "pointer", 
+                                "fontWeight": "bold",
+                                "marginTop": "10px"
+                            }),
+                            html.Div([
+                                html.Div("Space ID:", style={
+                                    "fontWeight": "bold", 
+                                    "marginTop": "10px"
+                                }),
+                                html.Code(GENIE_SPACE_ID, style={
+                                    "display": "block", 
+                                    "padding": "5px", 
+                                    "background": "#f5f5f5",
+                                    "marginBottom": "10px"
+                                }),
+                                html.Div("MCP URL:", style={
+                                    "fontWeight": "bold", 
+                                    "marginTop": "10px"
+                                }),
+                                html.Code(genie_mcp_url, style={
+                                    "display": "block", 
+                                    "padding": "5px", 
+                                    "background": "#f5f5f5", 
+                                    "fontSize": "11px",
+                                    "wordBreak": "break-all",
+                                    "marginBottom": "10px"
+                                }),
+                                html.Div("Internal Path:", style={
+                                    "fontWeight": "bold", 
+                                    "marginTop": "10px"
+                                }),
+                                html.Code(f"datarooms/{GENIE_SPACE_ID}", style={
+                                    "display": "block", 
+                                    "padding": "5px", 
+                                    "background": "#f5f5f5",
+                                    "marginBottom": "10px"
+                                }),
+                                html.Div("Full Error:", style={
+                                    "fontWeight": "bold", 
+                                    "marginTop": "10px"
+                                }),
+                                html.Pre(error_msg, style={
+                                    "background": "#f8f8f8",
+                                    "padding": "10px",
+                                    "fontSize": "11px",
+                                    "overflow": "auto",
+                                    "maxHeight": "200px",
+                                    "borderRadius": "4px"
+                                })
+                            ], style={"marginTop": "10px"})
+                        ], style={"marginTop": "10px"})
+                    ])
+                ])
+            
+            # For other errors, provide general error message
+            return html.Div([
+                html.Div("Error Loading MCP Tools", style={
+                    "color": "red", 
+                    "fontWeight": "bold",
+                    "marginTop": "10px"
                 }),
                 html.Div([
-                    "If you see 403 errors, make sure:",
-                    html.Ul([
-                        html.Li("apps.apps scope is added to manifest.yaml"),
-                        html.Li("The app has been redeployed after adding the scope"),
-                        html.Li("You have CAN_RUN permission on the Genie space"),
-                    ])
-                ], style={"marginTop": "10px", "fontSize": "12px"})
+                    "An error occurred while connecting to the MCP server:",
+                    html.Pre(error_msg, style={
+                        "background": "#f8f8f8",
+                        "padding": "10px",
+                        "borderRadius": "4px",
+                        "fontSize": "12px",
+                        "overflow": "auto",
+                        "maxHeight": "200px",
+                        "marginTop": "10px"
+                    })
+                ])
             ])
+        
+        # ========== STEP 9: CREATE AND INVOKE AGENT ==========
+        from deepagents import create_deep_agent
+        from prompts import RESEARCHER_INSTRUCTIONS
         
         logger.info("Creating deep insight agent...")
         
-        # Create agent with MCP tools
         agent = create_deep_agent(
             tools=mcp_tools,
             instructions=RESEARCHER_INSTRUCTIONS,
             model=model,
         ).with_config({"recursion_limit": 100})
         
-        logger.info(f"Calling agent with question: {user_question[:50]}...")
+        logger.info(f"Invoking agent with question: {user_question[:50]}...")
         
-        # Call the deep insight function
+        # Call the agent
         deep_insights = deep_insight_function(user_question, agent)
         
         logger.info("Deep insights generated successfully")
         
-        # Return formatted deep insights
+        # ========== STEP 10: RETURN FORMATTED RESPONSE ==========
         return html.Div([
             html.Div([
                 html.H4("🔍 Deep Insights Analysis", style={
@@ -1041,15 +1290,17 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
     except Exception as e:
         import traceback
         full_error = traceback.format_exc()
-        logger.error(f"Error generating deep insights: {full_error}")
+        logger.error(f"Unexpected error generating deep insights: {full_error}")
         
         return html.Div([
-            html.Div("Error generating deep insights:", style={
+            html.Div("Unexpected Error", style={
                 "color": "red", 
                 "fontWeight": "bold",
                 "marginTop": "10px",
                 "marginBottom": "10px"
             }),
+            html.Div("An unexpected error occurred while generating deep insights:", 
+                    style={"marginBottom": "10px"}),
             html.Pre(str(e), style={
                 "background": "#f8f8f8",
                 "padding": "10px",
@@ -1057,7 +1308,23 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
                 "fontSize": "12px",
                 "overflow": "auto",
                 "maxHeight": "200px"
-            })
+            }),
+            html.Details([
+                html.Summary("View full traceback", style={
+                    "cursor": "pointer", 
+                    "fontSize": "12px",
+                    "marginTop": "10px"
+                }),
+                html.Pre(full_error, style={
+                    "background": "#f8f8f8",
+                    "padding": "10px",
+                    "borderRadius": "4px",
+                    "fontSize": "11px",
+                    "overflow": "auto",
+                    "maxHeight": "300px",
+                    "marginTop": "10px"
+                })
+            ])
         ])
 # Callback to fetch spaces on load
 # Initialize welcome title and description from space info

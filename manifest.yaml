@@ -16,6 +16,7 @@ resource_specs:
 user_api_scopes:
   - serving.serving-endpoints
   - dashboards.genie
+  - dashboards
   - files.files
   - sql
   - apps.apps  # ✅ REQUIRED for OBO authentication with MCP
