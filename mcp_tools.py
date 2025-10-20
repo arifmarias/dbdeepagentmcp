@@ -1,6 +1,7 @@
 from typing import Any, Callable, List, Generator, TypedDict, cast
 from contextlib import asynccontextmanager
 import asyncio
+import threading
 
 from databricks_mcp import DatabricksOAuthClientProvider
 from databricks.sdk import WorkspaceClient
@@ -14,22 +15,17 @@ from mcp.types import (
     Tool as MCPTool,
 )
 from langchain_core.tools import BaseTool, ToolException, StructuredTool, tool
+
 NonTextContent = ImageContent | EmbeddedResource
 MAX_ITERATIONS = 1000
-
-import nest_asyncio
-import asyncio
-
-nest_asyncio.apply()
 
 class DatabricksConnection(TypedDict):
     """Type definition for storing connection information to a Databricks MCP server.
 
-        Attributes:
+    Attributes:
         server_url (str): Databricks MCP endpoint URL to connect to.
         workspace_client (WorkspaceClient): Databricks workspace client (for authentication).
     """
-
     server_url: str
     workspace_client: WorkspaceClient
 
@@ -38,10 +34,10 @@ class DatabricksConnection(TypedDict):
 async def _databricks_mcp_session(connection: DatabricksConnection):
     """Context manager for creating an asynchronous session to a Databricks MCP server.
 
-        Args:
+    Args:
         connection (DatabricksConnection): Connection information to the MCP server.
 
-        Yields:
+    Yields:
         ClientSession: Initialized MCP client session.
     """
     async with streamablehttp_client(
@@ -57,13 +53,13 @@ async def _databricks_mcp_session(connection: DatabricksConnection):
 async def _list_all_tools(session: ClientSession) -> list[MCPTool]:
     """Retrieves all tool information from the MCP server using pagination.
 
-        Args:
+    Args:
         session (ClientSession): MCP client session
 
-        Returns:
+    Returns:
         list[MCPTool]: List of all retrieved tools
 
-        Raises:
+    Raises:
         RuntimeError: If the page count exceeds the limit.
     """
     current_cursor: str | None = None
@@ -95,13 +91,13 @@ def _convert_call_tool_result(
 ) -> tuple[str | list[str], list[NonTextContent] | None]:
     """Returns the MCP tool call result, split into text and non-text content.
 
-        Args:
+    Args:
         call_tool_result (CallToolResult): MCP tool call result.
 
-        Returns:
+    Returns:
         tuple[str | list[str], list[NonTextContent] | None]: Text content and non-text content.
 
-        Raises:
+    Raises:
         ToolException: If an error occurs.
     """
     text_contents: list[TextContent] = []
@@ -130,12 +126,12 @@ def _convert_mcp_tool_to_langchain_tool(
 ) -> BaseTool:
     """Converts MCP tool information to a LangChain StructuredTool.
 
-          Args:
-          connection (DatabricksConnection): MCP server connection information
-          tool (MCPTool): MCP tool information
+    Args:
+        connection (DatabricksConnection): MCP server connection information
+        tool (MCPTool): MCP tool information
 
-          Returns:
-          BaseTool: LangChain-compatible tool
+    Returns:
+        BaseTool: LangChain-compatible tool
     """
     if connection is None:
         raise ValueError("a connection config must be provided")
@@ -152,7 +148,8 @@ def _convert_mcp_tool_to_langchain_tool(
     def call_tool_sync(
         **arguments: dict[str, Any]
     ) -> tuple[str | list[str], list[NonTextContent] | None]:
-        return asyncio.run(call_tool_async(**arguments))
+        # ✅ CRITICAL FIX: Proper async execution in Flask/Dash context
+        return _run_async_in_thread(call_tool_async(**arguments))
 
     return StructuredTool(
         name=tool.name,
@@ -165,18 +162,48 @@ def _convert_mcp_tool_to_langchain_tool(
     )
 
 
+# ✅ CRITICAL FIX: Helper function to run async code in Flask/Dash
+def _run_async_in_thread(coro):
+    """
+    Run an async coroutine in a separate thread with its own event loop.
+    This is necessary when the main thread already has a running event loop (Flask/Dash).
+    """
+    result = None
+    exception = None
+    
+    def run_in_thread():
+        nonlocal result, exception
+        try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(coro)
+            finally:
+                loop.close()
+        except Exception as e:
+            exception = e
+    
+    thread = threading.Thread(target=run_in_thread)
+    thread.start()
+    thread.join()
+    
+    if exception:
+        raise exception
+    return result
+
+
 def list_databricks_mcp_tools(
     connections: list[DatabricksConnection],
 ) -> list[BaseTool]:
     """Get all tools from multiple MCP servers and return them as a LangChain tool list.
 
-        Args:
+    Args:
         connections (list[DatabricksConnection]): List of MCP server connection information.
 
-        Returns:
+    Returns:
         list[BaseTool]: List of all LangChain-compatible tools.
     """
-
     if type(connections) != list:
         raise ValueError("connections must be a list of DatabricksConnection")
 
@@ -198,5 +225,8 @@ def list_databricks_mcp_tools(
         tasks = [_load_databricks_mcp_tools(con) for con in connections]
         return await asyncio.gather(*tasks)
 
+    # ✅ CRITICAL FIX: Run async code properly in Flask/Dash context
+    all_tools = _run_async_in_thread(gather())
+    
     # Flatten the results and return them as a single list of tools
-    return sum(asyncio.run(gather()), [])
+    return sum(all_tools, [])

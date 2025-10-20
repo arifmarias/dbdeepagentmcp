@@ -19,3 +19,4 @@ langgraph-cli[inmem]
 nest-asyncio
 databricks-mcp
 mcp
+databricks_ai_bridge

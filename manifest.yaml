@@ -11,8 +11,11 @@ resource_specs:
     description: "Genie space for the data chat app"
     genie_space_spec:
       permission: "CAN_RUN"
+
+# ✅ CRITICAL: Add apps.apps scope for OBO authentication with MCP
 user_api_scopes:
   - serving.serving-endpoints
   - dashboards.genie
   - files.files
   - sql
+  - apps.apps  # ✅ REQUIRED for OBO authentication with MCP

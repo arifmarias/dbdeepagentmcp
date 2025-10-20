@@ -882,20 +882,64 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
                 style={"color": "red", "marginTop": "10px"}
             )
         
+        # Validate GENIE_SPACE_ID
+        if not GENIE_SPACE_ID:
+            logger.error("GENIE_SPACE environment variable is not set")
+            return html.Div(
+                "Configuration error: Genie space ID is not configured.", 
+                style={"color": "red", "marginTop": "10px"}
+            )
+        
         logger.info(f"Starting deep insights for question: {user_question[:50]}...")
+        logger.info(f"Using Genie Space ID: {GENIE_SPACE_ID}")
         
-        # Import ModelServingUserCredentials for on-behalf-of-user auth
-        from databricks.sdk.credentials_provider import ModelServingUserCredentials
+        # Import credentials provider
+        from databricks_ai_bridge import ModelServingUserCredentials
         
-        # Create WorkspaceClient with ModelServingUserCredentials
-        # This enables on-behalf-of-user authentication for MCP in Databricks Apps
+        # ✅ CRITICAL FIX: Create WorkspaceClient with ONLY ModelServingUserCredentials
+        # DO NOT mix with token/config when using MCP from Databricks Apps
         workspace_client = WorkspaceClient(
             credentials_strategy=ModelServingUserCredentials()
         )
         
-        logger.info("WorkspaceClient created with ModelServingUserCredentials")
+        logger.info("WorkspaceClient created with ModelServingUserCredentials for OBO auth")
         
-        # Initialize the model with user token
+        # Validate Genie space access
+        try:
+            genie_client = GenieClient(
+                host=os.environ.get("DATABRICKS_HOST"),
+                space_id=GENIE_SPACE_ID,
+                token=user_token
+            )
+            space_info = genie_client.get_space(GENIE_SPACE_ID)
+            logger.info(f"Successfully validated access to Genie space: {space_info.get('title', 'Unknown')}")
+        except Exception as space_error:
+            logger.error(f"Failed to access Genie space: {str(space_error)}")
+            return html.Div([
+                html.Div("Error: Cannot access Genie space", style={
+                    "color": "red", 
+                    "fontWeight": "bold",
+                    "marginTop": "10px",
+                    "marginBottom": "10px"
+                }),
+                html.Div(f"Space ID: {GENIE_SPACE_ID}", style={
+                    "fontSize": "12px",
+                    "color": "#666",
+                    "marginBottom": "5px"
+                }),
+                html.Div("Possible issues:", style={
+                    "fontSize": "12px",
+                    "marginTop": "10px",
+                    "marginBottom": "5px"
+                }),
+                html.Ul([
+                    html.Li("The Genie space ID may be incorrect"),
+                    html.Li("You may not have permission to access this space"),
+                    html.Li("Check GENIE_SPACE in app.yaml"),
+                ], style={"fontSize": "12px", "color": "#666"})
+            ])
+        
+        # ✅ Initialize the model with user token (for ChatDatabricks, still use token)
         model = ChatDatabricks(
             endpoint=os.getenv("SERVING_ENDPOINT_NAME"),
             token=user_token,
@@ -909,28 +953,47 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
         
         logger.info(f"Connecting to Genie MCP at: {genie_mcp_url}")
         
-        # Create MCP connection
+        # ✅ Create MCP connection with OBO-authenticated workspace client
         mcp_connection_genie = DatabricksConnection(
             server_url=genie_mcp_url, 
-            workspace_client=workspace_client
+            workspace_client=workspace_client  # This now has proper OBO credentials
         )
         
-        # Get MCP tools with error handling
+        # Get MCP tools
         try:
             logger.info("Loading MCP tools...")
             mcp_tools = list_databricks_mcp_tools(connections=[mcp_connection_genie])
             logger.info(f"Successfully loaded {len(mcp_tools)} MCP tools")
             
-            # Log tool names for debugging
+            # Log tool names
             for tool in mcp_tools:
                 logger.info(f"  - Tool: {tool.name}")
                 
         except Exception as e:
             logger.error(f"Error loading MCP tools: {str(e)}", exc_info=True)
-            return html.Div(
-                f"Error loading MCP tools: {str(e)}", 
-                style={"color": "red", "marginTop": "10px"}
-            )
+            return html.Div([
+                html.Div("Error loading MCP tools:", style={
+                    "color": "red", 
+                    "fontWeight": "bold",
+                    "marginTop": "10px"
+                }),
+                html.Pre(str(e), style={
+                    "background": "#f8f8f8",
+                    "padding": "10px",
+                    "borderRadius": "4px",
+                    "fontSize": "12px",
+                    "overflow": "auto",
+                    "maxHeight": "200px"
+                }),
+                html.Div([
+                    "If you see 403 errors, make sure:",
+                    html.Ul([
+                        html.Li("apps.apps scope is added to manifest.yaml"),
+                        html.Li("The app has been redeployed after adding the scope"),
+                        html.Li("You have CAN_RUN permission on the Genie space"),
+                    ])
+                ], style={"marginTop": "10px", "fontSize": "12px"})
+            ])
         
         logger.info("Creating deep insight agent...")
         
@@ -938,7 +1001,6 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
         agent = create_deep_agent(
             tools=mcp_tools,
             instructions=RESEARCHER_INSTRUCTIONS,
-            # subagents=[critique_sub_agent, research_sub_agent],  # Add back if needed
             model=model,
         ).with_config({"recursion_limit": 100})
         
@@ -977,12 +1039,10 @@ def generate_deep_insights(n_clicks, btn_id, chat_history):
         ], className="deep-insight-wrapper")
         
     except Exception as e:
-        # Log the full exception with traceback
         import traceback
         full_error = traceback.format_exc()
         logger.error(f"Error generating deep insights: {full_error}")
         
-        # Return detailed error message
         return html.Div([
             html.Div("Error generating deep insights:", style={
                 "color": "red", 
