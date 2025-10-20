@@ -26,7 +26,7 @@ from prompts import RESEARCHER_INSTRUCTIONS
 
 load_dotenv()
 
-# Configure logging
+# Configure logging 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
